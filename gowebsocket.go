@@ -127,7 +127,7 @@ func (socket *Socket) Connect() {
 		for {
 			socket.receiveMu.Lock()
 			if socket.Timeout != 0 {
-				socket.Conn.SetReadDeadline(time.Now().Add(socket.Timeout))
+				_ = socket.Conn.SetReadDeadline(time.Now().Add(socket.Timeout))
 			}
 			messageType, message, err := socket.Conn.ReadMessage()
 			socket.receiveMu.Unlock()
@@ -155,20 +155,12 @@ func (socket *Socket) Connect() {
 	}()
 }
 
-func (socket *Socket) SendText(message string) {
-	err := socket.send(websocket.TextMessage, []byte(message))
-	if err != nil {
-		socket.logger.Error(err, "write:")
-		return
-	}
+func (socket *Socket) SendText(message string) error {
+	return socket.send(websocket.TextMessage, []byte(message))
 }
 
-func (socket *Socket) SendBinary(data []byte) {
-	err := socket.send(websocket.BinaryMessage, data)
-	if err != nil {
-		socket.logger.Error(err, "write:")
-		return
-	}
+func (socket *Socket) SendBinary(data []byte) error {
+	return socket.send(websocket.BinaryMessage, data)
 }
 
 func (socket *Socket) send(messageType int, data []byte) error {
@@ -183,7 +175,7 @@ func (socket *Socket) Close() {
 	if err != nil {
 		socket.logger.Error(err, "write close:")
 	}
-	socket.Conn.Close()
+	_ = socket.Conn.Close()
 	if socket.OnDisconnected != nil {
 		socket.IsConnected = false
 		socket.OnDisconnected(err, *socket)
