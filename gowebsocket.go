@@ -1,6 +1,7 @@
 package gowebsocket
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"github.com/go-logr/logr"
@@ -28,6 +29,8 @@ type Socket struct {
 	OnPingReceived    func(data string, socket Socket)
 	OnPongReceived    func(data string, socket Socket)
 	IsConnected       bool
+	receiveClosing    bool
+	sendClosing       bool
 	Timeout           time.Duration
 	sendMu            *sync.Mutex // Prevent "concurrent write to websocket connection"
 	receiveMu         *sync.Mutex
@@ -41,11 +44,11 @@ type ConnectionOptions struct {
 	Subprotocols   []string
 }
 
-// todo Yet to be done
 type ReconnectionOptions struct {
+	// todo Yet to be done
 }
 
-func New(url string) Socket {
+func New(url string, logger logr.Logger) Socket {
 	return Socket{
 		Url:           url,
 		RequestHeader: http.Header{},
@@ -57,6 +60,9 @@ func New(url string) Socket {
 		Timeout:         0,
 		sendMu:          &sync.Mutex{},
 		receiveMu:       &sync.Mutex{},
+		logger:          logger,
+		receiveClosing:  false,
+		sendClosing:     false,
 	}
 }
 
@@ -67,12 +73,12 @@ func (socket *Socket) setConnectionOptions() {
 	socket.WebsocketDialer.Subprotocols = socket.ConnectionOptions.Subprotocols
 }
 
-func (socket *Socket) Connect() {
+func (socket *Socket) Connect(ctx context.Context) {
 	var err error
 	var resp *http.Response
 	socket.setConnectionOptions()
 
-	socket.Conn, resp, err = socket.WebsocketDialer.Dial(socket.Url, socket.RequestHeader)
+	socket.Conn, resp, err = socket.WebsocketDialer.DialContext(ctx, socket.Url, socket.RequestHeader)
 
 	if err != nil {
 		if resp != nil {
@@ -115,7 +121,7 @@ func (socket *Socket) Connect() {
 	defaultCloseHandler := socket.Conn.CloseHandler()
 	socket.Conn.SetCloseHandler(func(code int, text string) error {
 		result := defaultCloseHandler(code, text)
-		socket.logger.Info("Disconnected from server ", result)
+		socket.logger.Info("Disconnected from server ", "result", result)
 		if socket.OnDisconnected != nil {
 			socket.IsConnected = false
 			socket.OnDisconnected(errors.New(text), *socket)
@@ -126,6 +132,9 @@ func (socket *Socket) Connect() {
 	go func() {
 		for {
 			socket.receiveMu.Lock()
+			if socket.receiveClosing {
+				break
+			}
 			if socket.Timeout != 0 {
 				_ = socket.Conn.SetReadDeadline(time.Now().Add(socket.Timeout))
 			}
@@ -139,7 +148,7 @@ func (socket *Socket) Connect() {
 				}
 				return
 			}
-			socket.logger.Info("recv: %s", message)
+			socket.logger.Info("recv", "message", message)
 
 			switch messageType {
 			case websocket.TextMessage:
@@ -164,20 +173,42 @@ func (socket *Socket) SendBinary(data []byte) error {
 }
 
 func (socket *Socket) send(messageType int, data []byte) error {
+	if socket.Conn == nil {
+		return errors.New("no socket connection")
+	}
+
 	socket.sendMu.Lock()
-	err := socket.Conn.WriteMessage(messageType, data)
-	socket.sendMu.Unlock()
-	return err
+	defer socket.sendMu.Unlock()
+
+	if socket.sendClosing {
+		return errors.New("write rejected, socket is closing")
+	}
+
+	return socket.Conn.WriteMessage(messageType, data)
 }
 
-func (socket *Socket) Close() {
+func (socket *Socket) Close() error {
+	if socket.Conn == nil {
+		// socket was never connected
+		return errors.New("no connection established")
+	}
+
 	err := socket.send(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 	if err != nil {
 		socket.logger.Error(err, "write close:")
 	}
+	socket.sendMu.Lock()
+	socket.sendClosing = true
+	socket.sendMu.Unlock()
+
+	socket.receiveMu.Lock()
+	socket.receiveClosing = true
+	socket.receiveMu.Unlock()
+
 	_ = socket.Conn.Close()
 	if socket.OnDisconnected != nil {
 		socket.IsConnected = false
 		socket.OnDisconnected(err, *socket)
 	}
+	return err
 }
